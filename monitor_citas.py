@@ -1,8 +1,11 @@
 """
-Monitor de citas — Extranjería Sevilla (v2 — más tolerante a cargas lentas)
+Monitor de citas — Extranjería Sevilla (v3 — entra desde el portal padre)
 Trámite: POLICÍA-TOMA DE HUELLAS (EXPEDICIÓN DE TARJETA) INICIAL, RENOVACIÓN, DUPLICADO Y LEY 14/2013
 Oficina: Documentación de Extranjeros POLICIA, Plaza de España Torre Norte, s/n, Sevilla
 Solicitante: CAROLINA LÓPEZ PUPO — NIE Z1195798X — Cuba
+
+IMPORTANTE: Entrar SIEMPRE desde el portal padre (sede.administracionespublicas.gob.es),
+no directamente a icp.administracionelectronica.gob.es (bloquea IPs de GitHub Actions).
 """
 
 import asyncio
@@ -15,8 +18,11 @@ from playwright.async_api import async_playwright
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN_HUELLAS")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID_HUELLAS")
 
+# --- URLS ---
+# Entramos por el portal padre (no por icp.* directamente)
+URL_PORTAL = "https://sede.administracionespublicas.gob.es/pagina/index/directorio/icpplus/"
+
 # --- DATOS DEL TRÁMITE ---
-URL_INICIO = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
 PROVINCIA = "Sevilla"
 OFICINA_TEXTO = "Documentación de Extranjeros POLICIA"
 TRAMITE_TEXTO = "POLICÍA-TOMA DE HUELLAS"
@@ -56,26 +62,6 @@ def enviar_telegram(mensaje, screenshot_path=None):
         print(f"❌ Excepción Telegram: {e}")
 
 
-async def cargar_pagina_inicio(page, intentos=3):
-    """Carga la página inicial con varios intentos y modo permisivo."""
-    for intento in range(1, intentos + 1):
-        try:
-            print(f"➡️  Intento {intento}/{intentos} de cargar {URL_INICIO}")
-            # 'commit' solo espera a que empiece la navegación — muy permisivo
-            await page.goto(URL_INICIO, wait_until="commit", timeout=90000)
-            # Ahora esperamos al select de provincia (la señal de que la página cargó OK)
-            await page.wait_for_selector("select#form", timeout=60000, state="visible")
-            print(f"   ✓ Página cargada en intento {intento}")
-            return True
-        except Exception as e:
-            print(f"   ✗ Falló intento {intento}: {str(e)[:120]}")
-            if intento < intentos:
-                await page.wait_for_timeout(5000)
-            else:
-                raise
-    return False
-
-
 async def revisar_citas():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -97,7 +83,6 @@ async def revisar_citas():
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             },
         )
-        # Subimos el timeout por defecto de todas las acciones
         context.set_default_timeout(45000)
         context.set_default_navigation_timeout(90000)
 
@@ -105,10 +90,11 @@ async def revisar_citas():
 
         try:
             # ========================================
-            # PASO 1: Cargar página con reintentos
+            # PASO 0: Entrar por el PORTAL PADRE
             # ========================================
-            await cargar_pagina_inicio(page)
-            await page.wait_for_timeout(1500)
+            print(f"➡️  Entrando en portal padre: {URL_PORTAL}")
+            await page.goto(URL_PORTAL, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2000)
 
             # Aceptar cookies si aparece
             try:
@@ -121,6 +107,18 @@ async def revisar_citas():
                 pass
 
             # ========================================
+            # PASO 1: Clic en "Acceder al Procedimiento"
+            #   → esto navega a icp.* de forma natural
+            # ========================================
+            print("➡️  Clic en 'Acceder al Procedimiento'")
+            await page.click("text=Acceder al Procedimiento")
+
+            # Espera al select de provincia (señal de que llegamos al icpplus)
+            await page.wait_for_selector("select#form", timeout=90000, state="visible")
+            await page.wait_for_timeout(1500)
+            print(f"   ✓ Llegamos a: {page.url}")
+
+            # ========================================
             # PASO 2: Seleccionar provincia Sevilla
             # ========================================
             print(f"➡️  Seleccionando provincia: {PROVINCIA}")
@@ -128,7 +126,6 @@ async def revisar_citas():
             await page.wait_for_timeout(800)
 
             await page.click("input[value='Aceptar'], button:has-text('Aceptar')")
-            # Espera a que aparezca el select de oficina
             await page.wait_for_selector("select", timeout=60000, state="visible")
             await page.wait_for_timeout(1500)
 
@@ -229,7 +226,7 @@ async def revisar_citas():
                     "🚨 ¡POSIBLES CITAS DISPONIBLES! 🚨\n\n"
                     "📍 Sevilla — Toma de Huellas\n"
                     "👤 Carolina López Pupo\n\n"
-                    f"Entra YA a:\n{URL_INICIO}\n\n"
+                    f"Entra YA a:\n{URL_PORTAL}\n\n"
                     "(Revisa la captura para confirmar)"
                 )
                 enviar_telegram(mensaje, screenshot_final)
