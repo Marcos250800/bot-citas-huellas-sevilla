@@ -1,0 +1,39 @@
+name: Monitor Citas Huellas Sevilla
+
+on:
+  # Permite lanzarlo manualmente desde la pestaña Actions
+  workflow_dispatch:
+
+  # Disparador externo (cron-job.org enviará POST aquí cada 2 min)
+  repository_dispatch:
+    types: [check-citas-huellas]
+
+  # Cron de respaldo de GitHub (cada 5 min — por si cron-job.org falla)
+  schedule:
+    - cron: "*/5 * * * *"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN_HUELLAS: ${{ secrets.TELEGRAM_BOT_TOKEN_HUELLAS }}
+          TELEGRAM_CHAT_ID_HUELLAS: ${{ secrets.TELEGRAM_CHAT_ID_HUELLAS }}
+        run: python monitor_citas.py
