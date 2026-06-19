@@ -1,10 +1,8 @@
 """
-Monitor de citas — Extranjería Sevilla
+Monitor de citas — Extranjería Sevilla (v2 — más tolerante a cargas lentas)
 Trámite: POLICÍA-TOMA DE HUELLAS (EXPEDICIÓN DE TARJETA) INICIAL, RENOVACIÓN, DUPLICADO Y LEY 14/2013
 Oficina: Documentación de Extranjeros POLICIA, Plaza de España Torre Norte, s/n, Sevilla
 Solicitante: CAROLINA LÓPEZ PUPO — NIE Z1195798X — Cuba
-
-Stack: Playwright + GitHub Actions + Telegram (con captura)
 """
 
 import asyncio
@@ -13,15 +11,15 @@ import sys
 import requests
 from playwright.async_api import async_playwright
 
-# --- CREDENCIALES (vienen de los secrets de GitHub) ---
+# --- CREDENCIALES ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN_HUELLAS")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID_HUELLAS")
 
 # --- DATOS DEL TRÁMITE ---
 URL_INICIO = "https://icp.administracionelectronica.gob.es/icpplus/index.html"
 PROVINCIA = "Sevilla"
-OFICINA_TEXTO = "Documentación de Extranjeros POLICIA"  # match parcial, suficientemente único
-TRAMITE_TEXTO = "POLICÍA-TOMA DE HUELLAS"  # match parcial al principio del texto
+OFICINA_TEXTO = "Documentación de Extranjeros POLICIA"
+TRAMITE_TEXTO = "POLICÍA-TOMA DE HUELLAS"
 
 # --- DATOS DE CAROLINA ---
 NIE = "Z1195798X"
@@ -58,6 +56,26 @@ def enviar_telegram(mensaje, screenshot_path=None):
         print(f"❌ Excepción Telegram: {e}")
 
 
+async def cargar_pagina_inicio(page, intentos=3):
+    """Carga la página inicial con varios intentos y modo permisivo."""
+    for intento in range(1, intentos + 1):
+        try:
+            print(f"➡️  Intento {intento}/{intentos} de cargar {URL_INICIO}")
+            # 'commit' solo espera a que empiece la navegación — muy permisivo
+            await page.goto(URL_INICIO, wait_until="commit", timeout=90000)
+            # Ahora esperamos al select de provincia (la señal de que la página cargó OK)
+            await page.wait_for_selector("select#form", timeout=60000, state="visible")
+            print(f"   ✓ Página cargada en intento {intento}")
+            return True
+        except Exception as e:
+            print(f"   ✗ Falló intento {intento}: {str(e)[:120]}")
+            if intento < intentos:
+                await page.wait_for_timeout(5000)
+            else:
+                raise
+    return False
+
+
 async def revisar_citas():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -66,6 +84,7 @@ async def revisar_citas():
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
                 "--disable-dev-shm-usage",
+                "--disable-gpu",
             ],
         )
         context = await browser.new_context(
@@ -73,16 +92,23 @@ async def revisar_citas():
                        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
             viewport={"width": 1366, "height": 900},
             locale="es-ES",
+            extra_http_headers={
+                "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
         )
+        # Subimos el timeout por defecto de todas las acciones
+        context.set_default_timeout(45000)
+        context.set_default_navigation_timeout(90000)
+
         page = await context.new_page()
 
         try:
             # ========================================
-            # PASO 1: Entrar y aceptar cookies
+            # PASO 1: Cargar página con reintentos
             # ========================================
-            print(f"➡️  Entrando en {URL_INICIO}")
-            await page.goto(URL_INICIO, wait_until="domcontentloaded", timeout=60000)
-            await page.wait_for_timeout(2000)
+            await cargar_pagina_inicio(page)
+            await page.wait_for_timeout(1500)
 
             # Aceptar cookies si aparece
             try:
@@ -90,7 +116,7 @@ async def revisar_citas():
                 if await acepto.is_visible(timeout=3000):
                     await acepto.click()
                     print("🍪 Cookies aceptadas")
-                    await page.wait_for_timeout(1000)
+                    await page.wait_for_timeout(800)
             except Exception:
                 pass
 
@@ -101,17 +127,15 @@ async def revisar_citas():
             await page.select_option("select#form", label=PROVINCIA)
             await page.wait_for_timeout(800)
 
-            # Clic en Aceptar
             await page.click("input[value='Aceptar'], button:has-text('Aceptar')")
-            await page.wait_for_load_state("domcontentloaded", timeout=30000)
+            # Espera a que aparezca el select de oficina
+            await page.wait_for_selector("select", timeout=60000, state="visible")
             await page.wait_for_timeout(1500)
 
             # ========================================
             # PASO 3: Seleccionar oficina
             # ========================================
             print(f"➡️  Seleccionando oficina: {OFICINA_TEXTO}")
-            # El select de oficinas — selecciono por texto parcial usando JS porque
-            # los selects de la sede no siempre tienen label exacto
             oficina_seleccionada = await page.evaluate(f"""
                 () => {{
                     const selects = document.querySelectorAll('select');
@@ -127,10 +151,9 @@ async def revisar_citas():
                     return null;
                 }}
             """)
-
             if not oficina_seleccionada:
-                raise Exception(f"No se encontró la oficina '{OFICINA_TEXTO}' en el desplegable")
-            print(f"   ✓ Oficina: {oficina_seleccionada}")
+                raise Exception(f"No se encontró oficina '{OFICINA_TEXTO}'")
+            print(f"   ✓ {oficina_seleccionada}")
             await page.wait_for_timeout(1500)
 
             # ========================================
@@ -152,55 +175,46 @@ async def revisar_citas():
                     return null;
                 }}
             """)
-
             if not tramite_seleccionado:
-                raise Exception(f"No se encontró el trámite '{TRAMITE_TEXTO}' en el desplegable")
-            print(f"   ✓ Trámite: {tramite_seleccionado}")
+                raise Exception(f"No se encontró trámite '{TRAMITE_TEXTO}'")
+            print(f"   ✓ {tramite_seleccionado}")
             await page.wait_for_timeout(1000)
 
-            # Clic en Aceptar
             await page.click("input[value='Aceptar'], button:has-text('Aceptar')")
-            await page.wait_for_load_state("domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(1500)
+            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2000)
 
             # ========================================
             # PASO 5: Clic en "Presentación sin Cl@ve"
             # ========================================
-            print("➡️  Seleccionando 'Presentación sin Cl@ve'")
+            print("➡️  Clic en 'Presentación sin Cl@ve'")
             await page.click("text=Presentación sin Cl@ve")
-            await page.wait_for_load_state("domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(1500)
+            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2000)
 
             # ========================================
-            # PASO 6: Rellenar formulario (NIE, nombre, país)
+            # PASO 6: Rellenar formulario
             # ========================================
-            print(f"➡️  Rellenando formulario: NIE={NIE}, nombre={NOMBRE}, país={PAIS}")
-
-            # NIE — el input suele llamarse 'txtIdCitado' o similar
+            print(f"➡️  Rellenando formulario")
             await page.fill("input[name='txtIdCitado'], input#txtIdCitado", NIE)
-
-            # Nombre — 'txtDesCitado'
             await page.fill("input[name='txtDesCitado'], input#txtDesCitado", NOMBRE)
-
-            # País — select con CUBA
             await page.select_option("select[name='txtPaisNac'], select#txtPaisNac", label=PAIS)
             await page.wait_for_timeout(800)
 
-            # Clic en Aceptar
             await page.click("input[value='Aceptar'], button:has-text('Aceptar')")
-            await page.wait_for_load_state("domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(1500)
+            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2000)
 
             # ========================================
             # PASO 7: Clic en "Solicitar Cita"
             # ========================================
             print("➡️  Clic en 'Solicitar Cita'")
             await page.click("text=Solicitar Cita")
-            await page.wait_for_load_state("domcontentloaded", timeout=30000)
-            await page.wait_for_timeout(2000)
+            await page.wait_for_load_state("domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(2500)
 
             # ========================================
-            # PASO 8: Comprobar si hay citas
+            # PASO 8: Comprobar resultado
             # ========================================
             contenido = (await page.content()).lower()
             screenshot_final = "/tmp/cita_final.png"
@@ -208,7 +222,6 @@ async def revisar_citas():
 
             if SIN_CITAS_TEXTO in contenido:
                 print("😴 No hay citas disponibles")
-                # No mandamos nada por Telegram para no saturar
                 return False
             else:
                 print("🎉 ¡PARECE QUE HAY CITAS!")
@@ -216,15 +229,14 @@ async def revisar_citas():
                     "🚨 ¡POSIBLES CITAS DISPONIBLES! 🚨\n\n"
                     "📍 Sevilla — Toma de Huellas\n"
                     "👤 Carolina López Pupo\n\n"
-                    "Entra YA a:\n"
-                    f"{URL_INICIO}\n\n"
+                    f"Entra YA a:\n{URL_INICIO}\n\n"
                     "(Revisa la captura para confirmar)"
                 )
                 enviar_telegram(mensaje, screenshot_final)
                 return True
 
         except Exception as e:
-            print(f"❌ ERROR en el flujo: {e}")
+            print(f"❌ ERROR: {e}")
             screenshot_error = "/tmp/cita_error.png"
             try:
                 await page.screenshot(path=screenshot_error, full_page=True)
