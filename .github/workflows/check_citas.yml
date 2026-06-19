@@ -36,4 +36,4 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN_HUELLAS: ${{ secrets.TELEGRAM_BOT_TOKEN_HUELLAS }}
           TELEGRAM_CHAT_ID_HUELLAS: ${{ secrets.TELEGRAM_CHAT_ID_HUELLAS }}
-        run: python monitor_citas.py
+        run: python -u monitor_citas.py
